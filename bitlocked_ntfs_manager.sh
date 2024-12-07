@@ -1,10 +1,11 @@
 #!/bin/bash
-# set -x # for logging
+# set -x
 
 BITLOCKER_MOUNT="/mnt/bitlocker"
 NTFS_MOUNT="/mnt/ntfs"
-MEMORY_FILE="$HOME/.pssd_memory"
 ENCRYPTED_MEMORY_FILE="$HOME/.pssd_memory.gpg"
+
+declare -a PSSD_ENTRIES
 
 if ! command -v gpg &>/dev/null; then
   echo -e "\e[31mError: gpg is not installed. Please install it and try again.\e[0m"
@@ -12,11 +13,14 @@ if ! command -v gpg &>/dev/null; then
 fi
 
 cleanup() {
-  if [ -f "$MEMORY_FILE" ]; then
-    echo -e "\n\e[33mEncrypting memory file before exit...\e[0m"
-    gpg --quiet --batch --yes --symmetric --cipher-algo AES256 --passphrase "$MEMORY_PASSWORD" --output "$ENCRYPTED_MEMORY_FILE" "$MEMORY_FILE"
-    rm -f "$MEMORY_FILE"
-    echo -e "\e[32mMemory file encrypted. Goodbye!\e[0m"
+  if [ ${#PSSD_ENTRIES[@]} -gt 0 ]; then
+    echo -e "\n\e[33mEncrypting memory before exit...\e[0m"
+    {
+      for entry in "${PSSD_ENTRIES[@]}"; do
+        echo "$entry"
+      done
+    } | gpg --quiet --batch --yes --symmetric --cipher-algo AES256 --passphrase "$MEMORY_PASSWORD" --output "$ENCRYPTED_MEMORY_FILE"
+    echo -e "\e[32mMemory encrypted. Goodbye!\e[0m"
   fi
   exit
 }
@@ -38,36 +42,44 @@ set_new_password() {
 decrypt_memory() {
   if [ -f "$ENCRYPTED_MEMORY_FILE" ]; then
     secure_read_password
-    gpg --quiet --batch --yes --decrypt --passphrase "$MEMORY_PASSWORD" --output "$MEMORY_FILE" "$ENCRYPTED_MEMORY_FILE" 2>/dev/null
+    DECRYPTED_CONTENT=$(gpg --quiet --batch --yes --decrypt --passphrase "$MEMORY_PASSWORD" "$ENCRYPTED_MEMORY_FILE" 2>/dev/null)
     if [ $? -ne 0 ]; then
-      echo -e "\e[31mError: Failed to decrypt the memory file. Exiting.\e[0m"
+      echo -e "\e[31mError: Failed to decrypt the memory. Exiting.\e[0m"
       exit 1
     fi
+    IFS=$'\n' read -rd '' -a PSSD_ENTRIES <<< "$DECRYPTED_CONTENT"
+    unset DECRYPTED_CONTENT
   else
     set_new_password
-    touch "$MEMORY_FILE"
+    PSSD_ENTRIES=()
   fi
 }
 
 encrypt_memory() {
-  if [ -f "$MEMORY_FILE" ]; then
+  if [ ${#PSSD_ENTRIES[@]} -gt 0 ]; then
     if [ -z "$MEMORY_PASSWORD" ]; then
-      echo -e "\e[31mError: MEMORY_PASSWORD is empty. The memory file will be deleted immediately.\e[0m"
-      rm -f "$MEMORY_FILE"
+      echo -e "\e[31mError: MEMORY_PASSWORD is empty. Memory will not be saved.\e[0m"
+      PSSD_ENTRIES=()
       exit 1
     fi
-    gpg --quiet --batch --yes --symmetric --cipher-algo AES256 --passphrase "$MEMORY_PASSWORD" --output "$ENCRYPTED_MEMORY_FILE" "$MEMORY_FILE"
-    rm -f "$MEMORY_FILE"
+    {
+      for entry in "${PSSD_ENTRIES[@]}"; do
+        echo "$entry"
+      done
+    } | gpg --quiet --batch --yes --symmetric --cipher-algo AES256 --passphrase "$MEMORY_PASSWORD" --output "$ENCRYPTED_MEMORY_FILE"
   fi
 }
 
 add_pssd_info() {
   echo -e "\e[36mEnter USB ID (format: 0000:0000):\e[0m"
   read USB_ID
-  if grep -q "$USB_ID" "$MEMORY_FILE"; then
-    echo -e "\e[33mUSB ID $USB_ID already exists in memory.\e[0m"
-    return
-  fi
+  for entry in "${PSSD_ENTRIES[@]}"; do
+    if [[ "$entry" == "$USB_ID|"* ]]; then
+      echo -e "\e[33mUSB ID $USB_ID already exists in memory.\e[0m"
+      return
+    fi
+  done
+
   echo -e "\e[36mEnter nickname for this PSSD:\e[0m"
   read NICKNAME
   echo -e "\e[36mEnter BitLocker password for this PSSD:\e[0m"
@@ -77,20 +89,28 @@ add_pssd_info() {
     echo -e "\e[31mError: Password cannot be empty. Aborting.\e[0m"
     return
   fi
-  echo "$USB_ID|$NICKNAME|$PASSWORD" >> "$MEMORY_FILE"
+  PSSD_ENTRIES+=("$USB_ID|$NICKNAME|$PASSWORD")
   echo -e "\e[32mPSSD information saved successfully.\e[0m"
 }
 
 unlock_and_mount_pssd() {
   echo -e "\e[36mAvailable PSSDs:\e[0m"
-  awk -F'|' '{print NR ") " $2 " (" $1 ")"}' "$MEMORY_FILE"
+  i=1
+  for entry in "${PSSD_ENTRIES[@]}"; do
+    USB_ID=$(echo "$entry" | awk -F'|' '{print $1}')
+    NICKNAME=$(echo "$entry" | awk -F'|' '{print $2}')
+    echo "$i) $NICKNAME ($USB_ID)"
+    ((i++))
+  done
+
   echo -e "\e[36mEnter the number corresponding to the PSSD you want to mount:\e[0m"
   read CHOICE
-  PSSD_INFO=$(sed -n "${CHOICE}p" "$MEMORY_FILE")
-  if [ -z "$PSSD_INFO" ]; then
+  if (( CHOICE < 1 || CHOICE > ${#PSSD_ENTRIES[@]} )); then
     echo -e "\e[31mInvalid choice. Please try again.\e[0m"
     return
   fi
+  PSSD_INFO="${PSSD_ENTRIES[$((CHOICE-1))]}"
+
   USB_ID=$(echo "$PSSD_INFO" | awk -F'|' '{print $1}')
   NICKNAME=$(echo "$PSSD_INFO" | awk -F'|' '{print $2}')
   PASSWORD=$(echo "$PSSD_INFO" | awk -F'|' '{print $3}')
@@ -156,7 +176,7 @@ unmount_pssd() {
 
 decrypt_memory
 while true; do
-  echo -e "\e[36m<Choose an option>\e[0m"
+  echo -e "\e[36m[Choose an option]\e[0m"
   echo -e "\e[36m1) Add PSSD information\e[0m"
   echo -e "\e[36m2) Unlock and mount a PSSD\e[0m"
   echo -e "\e[36m3) Unmount PSSD\e[0m"
