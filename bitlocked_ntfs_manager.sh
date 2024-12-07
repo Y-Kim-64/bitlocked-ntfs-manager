@@ -135,11 +135,17 @@ unlock_and_mount_pssd() {
     return
   fi
 
-  PARTITION_PATH="${DEVICE_PATH}1"
+  PARTITION_PATH=$(lsblk -lnpo NAME,TYPE "$DEVICE_PATH" | awk '$2=="part" {print $1; exit}')
+  if [ -z "$PARTITION_PATH" ]; then
+    echo -e "\e[31mError: No partition found on $DEVICE_PATH. Please ensure the PSSD is properly formatted.\e[0m"
+    return
+  fi
+
   sudo umount $NTFS_MOUNT 2>/dev/null || echo -e "\e[33mNTFS already unmounted.\e[0m"
   sudo umount $BITLOCKER_MOUNT 2>/dev/null || echo -e "\e[33mBitLocker already unmounted.\e[0m"
   sudo rm -rf $BITLOCKER_MOUNT/dislocker-file
 
+  echo -e "\e[33mUsing partition $PARTITION_PATH for dislocker.\e[0m"
   sudo dislocker -V $PARTITION_PATH --user-password="$PASSWORD" --force -- $BITLOCKER_MOUNT &> /tmp/dislocker.log
   if [ $? -ne 0 ]; then
     echo -e "\e[31mError: Failed to unlock the BitLocker-encrypted PSSD. Check /tmp/dislocker.log for details.\e[0m"
